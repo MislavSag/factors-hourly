@@ -111,6 +111,5 @@ writeLines(cont, "padobran_predictors.sh")
 # scp -r /home/sn/data/strategies/factors/prices padobran:/home/jmaric/factors/prices
 
 # Add file to padobran
-# cd C:\Users\Mislav\projects_r\alpha_erf
-# scp.exe -r .\data padobran:/home/jmaric/alpha_erf/
+# scp.exe -r D:/predictors/prices_factors_hour padobran:/home/jmaric/factors-hourly/
 # scp -r /home/sn/projects_r/alpha_erf/data padobran:/home/jmaric/alpha_erf/data/
