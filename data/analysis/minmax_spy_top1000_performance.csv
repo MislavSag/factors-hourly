@@ -1,0 +1,3 @@
+period,model,n,mean_bp,sd_bp,t_stat,annualized_return,annualized_sd,annualized_sharpe,hit_rate,cum_return,max_drawdown,first_bar_mode,retrain_period,use_train_weights,position_sizing,annual_scale,long_share,avg_abs_position,max_abs_position,first_bar_trades,retrain_count
+full_oos,linear_minmax,7362,0.762396512661544,32.2221108231734,2.03013454205506,0.113431138311356,0.125293887000209,0.905320610822513,0.502173322466721,0.687353726022209,0.156317532696919,exclude,year,FALSE,sign,1512,0.428416191252377,1,1,0,6
+full_oos,benchmark_spy,7362,0.270450912262763,32.2299953408938,0.719989419772018,0.0336126136229411,0.125324545509136,0.268204552319649,0.527574028796523,0.174650897007064,0.172127270923937,exclude,year,FALSE,benchmark,1512,1,1,1,0,
