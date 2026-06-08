@@ -39,12 +39,12 @@ if (!file.exists(file_name)) {
 }
 
 # python environment
-if (interactive()) {
-  reticulate::use_virtualenv("/home/sn/projects_py/pyquant", required = TRUE)
-} else {
-  reticulate::use_virtualenv("/opt/venv", required = TRUE)
-}
-# theftms::init_theft("/opt/venv") # ???
+python_virtualenv = Sys.getenv(
+  "PADOBRAN_PYTHON_VENV",
+  unset = if (interactive()) path.expand("~/projects_py/pyquant") else "/opt/venv"
+)
+reticulate::use_virtualenv(python_virtualenv, required = TRUE)
+# theftms::init_theft(python_virtualenv) # ???
 tsfel = reticulate::import("tsfel")
 tsfresh = reticulate::import("tsfresh", convert = FALSE)
 warnigns = reticulate::import("warnings", convert = FALSE)
