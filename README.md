@@ -1,25 +1,20 @@
 # factors-hourly
 
-## Padobran Python virtualenv
+## Local Python virtualenv
 
-Create the Python environment on Padobran with:
+Create the Python environment on Windows with:
 
-```bash
-cd ~/factors-hourly
-bash setup_padobran_venv.sh
+```powershell
+.\setup_local_venv.ps1
 ```
 
-By default this creates:
+By default this creates `.venv` in this project. `padobran_predictors.R` uses that environment in interactive/local runs, unless `FACTORS_PYTHON_VENV` is set.
 
-```bash
-$HOME/projects_py/pyquant
+For a custom local environment:
+
+```powershell
+.\setup_local_venv.ps1 -VenvDir "D:\predictors\pyquant"
+$env:FACTORS_PYTHON_VENV = "D:\predictors\pyquant"
 ```
 
-`padobran_predictors.R` uses that virtualenv when running interactively. To force the same environment for a non-interactive `Rscript` run:
-
-```bash
-export PADOBRAN_PYTHON_VENV="$HOME/projects_py/pyquant"
-Rscript padobran_predictors.R
-```
-
-The Apptainer/PBS path still defaults to `/opt/venv` unless `PADOBRAN_PYTHON_VENV` is set.
+Non-interactive Apptainer/PBS runs still default to `/opt/venv`.
