@@ -16,9 +16,9 @@ function Get-PythonSpec {
   }
 
   $candidates = @(
-    @{ Command = "py"; Args = @("-3.11") },
     @{ Command = "py"; Args = @("-3.10") },
     @{ Command = "py"; Args = @("-3.12") },
+    @{ Command = "py"; Args = @("-3.11") },
     @{ Command = "py"; Args = @("-3") },
     @{ Command = "python"; Args = @() }
   )
@@ -30,10 +30,19 @@ function Get-PythonSpec {
 
     $command = $candidate.Command
     $args = @($candidate.Args) + @("-c", "import sys")
-    & $command @args *> $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
 
-    if ($LASTEXITCODE -eq 0) {
-      return $candidate
+    try {
+      & $command @args *> $null
+
+      if ($LASTEXITCODE -eq 0) {
+        return $candidate
+      }
+    } catch {
+      # Candidate exists but requested Python runtime is unavailable.
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
     }
   }
 
