@@ -11,7 +11,7 @@ if (interactive()) {
   PATH_PRICES     = file.path("D:/predictors/prices_factors_hour")
   PATH_PREDICTORS = file.path("D:/predictors/hourly")
 } else {
-  PATH_PRICES = file.path("prices")
+  PATH_PRICES = Sys.getenv("PATH_PRICES", unset = file.path("prices_factors_hour"))
   PATH_PREDICTORS = file.path("hourly")
 }
 
