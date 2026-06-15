@@ -234,9 +234,9 @@ compute_one_factor = function(feature) {
   dt[, (lag_col) := shift(get(feature), n = LAG_BARS), by = symbol]
 
   out = dt[, {
-    signal = get(lag_col)
-    ret = get(RETURN_COL)
-    w = .factor_weight
+    signal = as.numeric(get(lag_col))
+    ret = as.numeric(get(RETURN_COL))
+    w = as.numeric(.factor_weight)
     ok = is.finite(signal) & is.finite(ret) & is.finite(w) & w > 0
     n_ok = sum(ok)
 
