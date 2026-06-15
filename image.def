@@ -25,6 +25,7 @@ From: r-base:4.5.0
   R --slave -e 'install.packages("bit64")'
   R --slave -e 'install.packages("remotes")'
   R --slave -e 'remotes::install_github("MislavSag/finfeatures")'
+  R --slave -e 'remotes::install_github("MislavSag/aifinfeatures")'
   R --slave -e 'install.packages("reticulate")'
   R --slave -e 'install.packages("exuber")'
   R --slave -e 'remotes::install_github("ottosven/backCUSUM")'
