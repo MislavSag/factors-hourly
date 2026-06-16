@@ -27,6 +27,8 @@ factor_returns = rbindlist(
 
 factor_returns[, date := as.POSIXct(date, tz = "America/New_York")]
 setorder(factor_returns, feature, date)
+long_rows = nrow(factor_returns)
+long_features = uniqueN(factor_returns$feature)
 
 long_file = file.path(PATH_FACTORS, "factor_returns_long.csv")
 fwrite(factor_returns, long_file)
@@ -46,21 +48,42 @@ setorder(summary_dt, -n_obs, feature)
 fwrite(summary_dt, file.path(PATH_FACTORS, "factor_returns_summary.csv"))
 
 if (WRITE_WIDE) {
+  wide_input = factor_returns[, .(
+    date,
+    trading_day,
+    bar_time,
+    is_first_bar,
+    feature,
+    factor_ret
+  )]
+  rm(factor_returns)
+  invisible(gc())
+
   wide = dcast(
-    factor_returns,
+    wide_input,
     date + trading_day + bar_time + is_first_bar ~ feature,
     value.var = "factor_ret"
   )
+  rm(wide_input)
+  invisible(gc())
+
   setorder(wide, date)
   wide_file = file.path(PATH_FACTORS, "factor_returns_wide.csv")
   fwrite(wide, wide_file)
   saveRDS(wide, file.path(PATH_FACTORS, "factor_returns_wide.rds"))
   cat(sprintf("Saved wide factor matrix: %s rows=%d cols=%d\n", wide_file, nrow(wide), ncol(wide)))
+  rm(wide)
+  invisible(gc())
+} else {
+  rm(factor_returns)
+  invisible(gc())
 }
 
 cat(sprintf(
   "Saved long factor returns: %s rows=%d features=%d\n",
   long_file,
-  nrow(factor_returns),
-  uniqueN(factor_returns$feature)
+  long_rows,
+  long_features
 ))
+
+quit(save = "no", status = 0L, runLast = FALSE)
