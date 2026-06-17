@@ -67,12 +67,19 @@ symbols = gsub("\\.csv", "", list.files(PATH_PRICES, pattern = "\\.csv$"))
 if (length(symbols) == 0L) {
   stop(sprintf("No CSV files found in PATH_PRICES: %s", PATH_PRICES))
 }
-if (is.na(i) || i < 1L || i > length(symbols)) {
+if (is.na(i) || i < 1L) {
   stop(sprintf(
-    "Invalid PBS_ARRAY_INDEX=%s for %d price files.",
-    Sys.getenv("PBS_ARRAY_INDEX", unset = as.character(i)),
+    "Invalid PBS_ARRAY_INDEX=%s.",
+    Sys.getenv("PBS_ARRAY_INDEX", unset = as.character(i))
+  ))
+}
+if (i > length(symbols)) {
+  cat(sprintf(
+    "PBS_ARRAY_INDEX=%d exceeds available price files=%d. Nothing to do.\n",
+    i,
     length(symbols)
   ))
+  quit(save = "no", status = 0L, runLast = FALSE)
 }
 symbol_i = symbols[i]
 
@@ -289,4 +296,5 @@ predictors = Reduce(
 
 fwrite(predictors, file_name)
 cat(sprintf("Saved: %s\n", file_name))
+quit(save = "no", status = 0L, runLast = FALSE)
 
