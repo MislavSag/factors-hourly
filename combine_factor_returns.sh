@@ -3,6 +3,7 @@
 #PBS -N combine_factor_returns
 #PBS -l ncpus=1
 #PBS -l mem=24GB
+#PBS -l walltime=168:00:00
 #PBS -o logs
 #PBS -j oe
 

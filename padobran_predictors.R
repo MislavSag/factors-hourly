@@ -83,13 +83,43 @@ if (i > length(symbols)) {
 }
 symbol_i = symbols[i]
 
-# If files already exists cont
+predictor_file_complete = function(file) {
+  if (!file.exists(file)) return(FALSE)
+
+  file_size = file.info(file)$size
+  if (is.na(file_size) || file_size <= 0) return(FALSE)
+
+  header = tryCatch(
+    names(fread(file, nrows = 0L, showProgress = FALSE)),
+    error = function(e) character()
+  )
+  if (!all(c("symbol", "date") %in% header) || length(header) <= 2L) {
+    return(FALSE)
+  }
+
+  first_row = tryCatch(
+    fread(file, nrows = 1L, showProgress = FALSE),
+    error = function(e) NULL
+  )
+  !is.null(first_row) && nrow(first_row) > 0L
+}
+
+# If the predictor file already exists and is readable, skip this symbol.
 file_name = file.path(PATH_PREDICTORS, paste0(symbol_i, ".csv"))
-if (!file.exists(file_name)) {
-  cat(sprintf("Processing: %s\n", symbol_i))
+tmp_file_name = paste0(file_name, ".tmp")
+if (predictor_file_complete(file_name)) {
+  cat(sprintf("Predictor file already complete: %s\n", file_name))
+  quit(save = "no", status = 0L, runLast = FALSE)
 } else {
-  cat(sprintf("File already exists: %s\n", file_name))
-  quit(save = "no", status = 0)
+  if (file.exists(file_name)) {
+    cat(sprintf("Removing incomplete predictor file: %s\n", file_name))
+    file.remove(file_name)
+  }
+  if (file.exists(tmp_file_name)) {
+    cat(sprintf("Removing stale temporary predictor file: %s\n", tmp_file_name))
+    file.remove(tmp_file_name)
+  }
+  cat(sprintf("Processing: %s\n", symbol_i))
 }
 
 # python environment
@@ -294,7 +324,11 @@ predictors = Reduce(
 
 # Save predictors
 
-fwrite(predictors, file_name)
+fwrite(predictors, tmp_file_name)
+if (!file.rename(tmp_file_name, file_name)) {
+  file.copy(tmp_file_name, file_name, overwrite = TRUE)
+  file.remove(tmp_file_name)
+}
 cat(sprintf("Saved: %s\n", file_name))
 quit(save = "no", status = 0L, runLast = FALSE)
 
