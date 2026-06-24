@@ -50,6 +50,12 @@ PATH_FUNDAMENTALS = env_chr("PATH_FUNDAMENTALS", "")
 
 RETURN_COL = env_chr("SIMPLE_RETURN_COL", "returns_oc")
 WINDOWS = parse_ints(env_chr("SIMPLE_WINDOWS", ""), c(22L, 147L, 441L))
+ZERO_TRADE_WINDOWS_DAYS = parse_ints(env_chr("SIMPLE_ZERO_TRADE_WINDOWS_DAYS", ""), c(21L, 126L, 252L))
+TURNOVER_WINDOW_DAYS = env_int("SIMPLE_TURNOVER_WINDOW_DAYS", 126L)
+IVOL_WINDOW_DAYS = env_int("SIMPLE_IVOL_WINDOW_DAYS", 252L)
+TAIL_BETA_WINDOW_DAYS = env_int("SIMPLE_TAIL_BETA_WINDOW_DAYS", 252L)
+RVOL_WINDOWS_DAYS = parse_ints(env_chr("SIMPLE_RVOL_WINDOWS_DAYS", ""), c(21L, 252L))
+MARKET_TAIL_Z = env_num("SIMPLE_MARKET_TAIL_Z", -1.0)
 TAIL_PROB = env_num("SIMPLE_TAIL_PROB", 0.10)
 MIN_LEG_N = env_int("SIMPLE_MIN_LEG_N", 10L)
 MAX_NA_FRAC = env_num("SIMPLE_MAX_NA_FRAC", 0.80)
@@ -124,8 +130,10 @@ read_price_file = function(file) {
 
   dt[, symbol := as.character(symbol)]
   dt[, .ret := as.numeric(get(RETURN_COL))]
+  dt[, .volume := as.numeric(volume)]
   dt[, .dollar_vol := as.numeric(close) * as.numeric(volume)]
   dt[!is.finite(.dollar_vol) | .dollar_vol <= 0, .dollar_vol := NA_real_]
+  dt[!is.finite(.volume) | .volume < 0, .volume := NA_real_]
   dt[!is.finite(.ret), .ret := NA_real_]
   dt[, .range := (as.numeric(high) - as.numeric(low)) / pmax(abs(as.numeric(close)), 1e-8)]
   dt[!is.finite(.range), .range := NA_real_]
@@ -137,6 +145,7 @@ read_price_file = function(file) {
     "bar_time",
     "is_first_bar",
     ".ret",
+    ".volume",
     ".dollar_vol",
     ".range"
   )
@@ -159,12 +168,14 @@ dt[, .weight := shift(.dollar_vol, 1L), by = symbol]
 dt[!is.finite(.weight) | .weight <= 0, .weight := NA_real_]
 
 feature_cols = character()
+feature_sources = data.table(feature = character(), source = character())
 for (window in WINDOWS) {
   mom_col = sprintf("mom_%d", window)
   vol_col = sprintf("vol_%d", window)
   dolvol_col = sprintf("dolvol_%d", window)
   range_col = sprintf("range_%d", window)
   rsi_col = sprintf("rsi_%d", window)
+  new_cols = c(mom_col, vol_col, dolvol_col, range_col, rsi_col)
 
   dt[, .logret_tmp := fifelse(is.finite(.ret) & .ret > -1, log1p(.ret), NA_real_)]
   dt[, (mom_col) := shift(exp(frollsum(.logret_tmp, n = window, align = "right", fill = NA_real_)) - 1, 1L), by = symbol]
@@ -178,9 +189,116 @@ for (window in WINDOWS) {
   dt[, .avg_down_tmp := frollmean(.down_tmp, n = window, align = "right", fill = NA_real_), by = symbol]
   dt[, (rsi_col) := shift(100 - 100 / (1 + .avg_up_tmp / pmax(.avg_down_tmp, 1e-12)), 1L), by = symbol]
 
-  feature_cols = c(feature_cols, mom_col, vol_col, dolvol_col, range_col, rsi_col)
+  feature_cols = c(feature_cols, new_cols)
+  feature_sources = rbind(
+    feature_sources,
+    data.table(feature = new_cols, source = "ohlcv_intraday"),
+    use.names = TRUE
+  )
 }
 dt[, c(".logret_tmp", ".up_tmp", ".down_tmp", ".avg_up_tmp", ".avg_down_tmp") := NULL]
+
+build_aleti_style_daily_features = function(hourly_dt) {
+  daily = hourly_dt[, .(
+    daily_ret = if (all(!is.finite(.ret))) NA_real_ else prod(1 + .ret[is.finite(.ret)]) - 1,
+    daily_volume = sum(.volume, na.rm = TRUE),
+    daily_dollar_vol = sum(.dollar_vol, na.rm = TRUE),
+    n_bars = sum(is.finite(.ret) | is.finite(.volume))
+  ), by = .(symbol, trading_day)]
+
+  all_days = sort(unique(hourly_dt$trading_day))
+  symbol_ranges = daily[, .(start_day = min(trading_day), end_day = max(trading_day)), by = symbol]
+  calendar = symbol_ranges[, .(trading_day = all_days[all_days >= start_day & all_days <= end_day]), by = symbol]
+  daily = daily[calendar, on = .(symbol, trading_day)]
+
+  daily[is.na(n_bars), n_bars := 0L]
+  daily[is.na(daily_volume), daily_volume := 0]
+  daily[is.na(daily_dollar_vol), daily_dollar_vol := 0]
+  daily[, zero_trade_day := as.integer(n_bars == 0L | daily_volume <= 0)]
+  daily[, daily_ret0 := fifelse(is.finite(daily_ret), daily_ret, 0)]
+
+  market_daily = daily[, .(
+    mkt_daily_ret = mean(daily_ret0, na.rm = TRUE),
+    mkt_daily_ret_vw = {
+      ok = is.finite(daily_ret0) & is.finite(daily_dollar_vol) & daily_dollar_vol > 0
+      if (any(ok)) sum(daily_ret0[ok] * daily_dollar_vol[ok]) / sum(daily_dollar_vol[ok]) else NA_real_
+    }
+  ), by = trading_day]
+  daily = market_daily[daily, on = "trading_day"]
+  setorder(daily, symbol, trading_day)
+
+  out_cols = character()
+  for (window in ZERO_TRADE_WINDOWS_DAYS) {
+    col = sprintf("zero_trades_%dd", window)
+    daily[, (col) := shift(frollsum(zero_trade_day, n = window, align = "right", fill = NA_real_), 1L), by = symbol]
+    out_cols = c(out_cols, col)
+  }
+
+  turnover_col = sprintf("turnover_proxy_%dd", TURNOVER_WINDOW_DAYS)
+  turnover_var_col = sprintf("turnover_var_proxy_%dd", TURNOVER_WINDOW_DAYS)
+  daily[, .log_dollar_vol := log1p(pmax(daily_dollar_vol, 0))]
+  daily[, (turnover_col) := shift(frollmean(.log_dollar_vol, n = TURNOVER_WINDOW_DAYS, align = "right", fill = NA_real_), 1L), by = symbol]
+  daily[, (turnover_var_col) := shift(frollsd(.log_dollar_vol, n = TURNOVER_WINDOW_DAYS, align = "right", fill = NA_real_)^2, 1L), by = symbol]
+  out_cols = c(out_cols, turnover_col, turnover_var_col)
+
+  for (window in RVOL_WINDOWS_DAYS) {
+    col = sprintf("rvol_%dd", window)
+    daily[, (col) := shift(frollsd(daily_ret0, n = window, align = "right", fill = NA_real_), 1L), by = symbol]
+    out_cols = c(out_cols, col)
+  }
+
+  daily[, .mean_r := frollmean(daily_ret0, n = IVOL_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .mean_m := frollmean(mkt_daily_ret, n = IVOL_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .mean_rm := frollmean(daily_ret0 * mkt_daily_ret, n = IVOL_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .mean_m2 := frollmean(mkt_daily_ret^2, n = IVOL_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .var_m := .mean_m2 - .mean_m^2]
+  daily[, .beta_capm := (.mean_rm - .mean_r * .mean_m) / fifelse(abs(.var_m) > 1e-12, .var_m, NA_real_)]
+  daily[, .resid_capm := daily_ret0 - .beta_capm * mkt_daily_ret]
+  ivol_col = sprintf("ivol_capm_%dd", IVOL_WINDOW_DAYS)
+  daily[, (ivol_col) := shift(frollsd(.resid_capm, n = IVOL_WINDOW_DAYS, align = "right", fill = NA_real_), 1L), by = symbol]
+  out_cols = c(out_cols, ivol_col)
+
+  market_tail = unique(daily[, .(trading_day, mkt_daily_ret)])
+  setorder(market_tail, trading_day)
+  market_tail[, .mkt_mean := shift(frollmean(mkt_daily_ret, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), 1L)]
+  market_tail[, .mkt_sd := shift(frollsd(mkt_daily_ret, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), 1L)]
+  market_tail[, market_tail_day := as.integer((mkt_daily_ret - .mkt_mean) / .mkt_sd <= MARKET_TAIL_Z)]
+  market_tail[is.na(market_tail_day), market_tail_day := 0L]
+  daily = market_tail[, .(trading_day, market_tail_day)][daily, on = "trading_day"]
+  setorder(daily, symbol, trading_day)
+
+  daily[, .tail := as.numeric(market_tail_day)]
+  daily[, .tail_n := frollsum(.tail, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .tail_sum_r := frollsum(.tail * daily_ret0, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .tail_sum_m := frollsum(.tail * mkt_daily_ret, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .tail_sum_rm := frollsum(.tail * daily_ret0 * mkt_daily_ret, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .tail_sum_m2 := frollsum(.tail * mkt_daily_ret^2, n = TAIL_BETA_WINDOW_DAYS, align = "right", fill = NA_real_), by = symbol]
+  daily[, .tail_mean_r := .tail_sum_r / .tail_n]
+  daily[, .tail_mean_m := .tail_sum_m / .tail_n]
+  daily[, .tail_cov := .tail_sum_rm / .tail_n - .tail_mean_r * .tail_mean_m]
+  daily[, .tail_var_m := .tail_sum_m2 / .tail_n - .tail_mean_m^2]
+  tail_beta_col = sprintf("beta_tailrisk_proxy_%dd", TAIL_BETA_WINDOW_DAYS)
+  daily[, (tail_beta_col) := shift(.tail_cov / fifelse(abs(.tail_var_m) > 1e-12, .tail_var_m, NA_real_), 1L), by = symbol]
+  out_cols = c(out_cols, tail_beta_col)
+
+  keep_cols = c("symbol", "trading_day", out_cols)
+  list(
+    data = daily[, ..keep_cols],
+    features = out_cols
+  )
+}
+
+daily_features = build_aleti_style_daily_features(dt)
+setkey(daily_features$data, symbol, trading_day)
+setkey(dt, symbol, trading_day)
+dt = daily_features$data[dt, on = .(symbol, trading_day)]
+setorder(dt, symbol, date)
+feature_cols = c(feature_cols, daily_features$features)
+feature_sources = rbind(
+  feature_sources,
+  data.table(feature = daily_features$features, source = "aleti_daily_proxy"),
+  use.names = TRUE
+)
 
 weighted_mean = function(x, w) {
   ok = is.finite(x) & is.finite(w) & w > 0
@@ -336,6 +454,12 @@ if (nzchar(PATH_FUNDAMENTALS) && file.exists(PATH_FUNDAMENTALS)) {
       setkey(dt, symbol, trading_day)
       dt = fundamentals[dt, roll = Inf]
       feature_cols = c(feature_cols, new_names)
+      feature_sources = rbind(
+        feature_sources,
+        data.table(feature = new_names, source = "fundamental"),
+        use.names = TRUE,
+        fill = TRUE
+      )
       manifest = rbind(
         manifest,
         data.table(feature = new_names, source = "fundamental"),
@@ -354,7 +478,7 @@ for (feature in feature_cols) {
 }
 manifest = rbind(
   manifest,
-  data.table(feature = feature_cols, source = fifelse(grepl("^fund_", feature_cols), "fundamental", "ohlcv")),
+  feature_sources,
   use.names = TRUE,
   fill = TRUE
 )
