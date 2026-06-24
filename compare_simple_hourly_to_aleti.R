@@ -19,6 +19,10 @@ PATH_COMPARE_OUT = env_chr(
   "PATH_COMPARE_OUT",
   file.path(dirname(PATH_SIMPLE_FACTORS), "aleti_comparison.csv")
 )
+PATH_COMPARE_PLOTS = env_chr(
+  "PATH_COMPARE_PLOTS",
+  file.path(dirname(PATH_COMPARE_OUT), "aleti_comparison_plots")
+)
 
 if (!file.exists(PATH_SIMPLE_FACTORS)) {
   stop(sprintf("Simple factor file not found: %s", PATH_SIMPLE_FACTORS))
@@ -90,6 +94,11 @@ merged = merge(
   all = FALSE,
   allow.cartesian = TRUE
 )
+merged[, plot_datetime := as.POSIXct(date, tz = "America/New_York")]
+if (all(is.na(merged$plot_datetime)) && "datetime" %in% names(merged)) {
+  merged[, plot_datetime := as.POSIXct(datetime, tz = "America/New_York")]
+}
+setorder(merged, plot_datetime)
 
 results = rbindlist(lapply(seq_len(nrow(active_map)), function(i) {
   simple_feature = active_map$simple_feature[[i]]
@@ -146,11 +155,83 @@ dir.create(dirname(PATH_COMPARE_OUT), recursive = TRUE, showWarnings = FALSE)
 fwrite(results, PATH_COMPARE_OUT)
 fwrite(comparison_map, sub("\\.csv$", "_availability.csv", PATH_COMPARE_OUT))
 
+dir.create(PATH_COMPARE_PLOTS, recursive = TRUE, showWarnings = FALSE)
+cumulative_curves = rbindlist(lapply(seq_len(nrow(active_map)), function(i) {
+  simple_feature = active_map$simple_feature[[i]]
+  aleti_feature = active_map$aleti_feature[[i]]
+  simple_col = paste0("simple__", simple_feature)
+  aleti_col = paste0("aleti__", aleti_feature)
+
+  if (!all(c(simple_col, aleti_col, "plot_datetime") %in% names(merged))) {
+    return(NULL)
+  }
+
+  dt = merged[, .(
+    datetime = plot_datetime,
+    simple_ret = as.numeric(get(simple_col)),
+    aleti_ret = as.numeric(get(aleti_col))
+  )]
+  dt = dt[is.finite(simple_ret) & is.finite(aleti_ret) & !is.na(datetime)]
+  if (nrow(dt) < 10L) return(NULL)
+  setorder(dt, datetime)
+
+  dt[, simple_cumret := cumprod(1 + simple_ret) - 1]
+  dt[, aleti_cumret := cumprod(1 + aleti_ret) - 1]
+  dt[, simple_feature := simple_feature]
+  dt[, aleti_feature := aleti_feature]
+
+  plot_file = file.path(
+    PATH_COMPARE_PLOTS,
+    sprintf("%s_vs_%s.png", simple_feature, aleti_feature)
+  )
+  plot_file = gsub("[^A-Za-z0-9_./-]", "_", plot_file)
+
+  png(plot_file, width = 1400, height = 850, res = 140)
+  y_range = range(c(dt$simple_cumret, dt$aleti_cumret), na.rm = TRUE)
+  plot(
+    dt$datetime,
+    dt$simple_cumret,
+    type = "l",
+    col = "#1f77b4",
+    lwd = 1.5,
+    ylim = y_range,
+    xlab = "Time",
+    ylab = "Cumulative return",
+    main = sprintf("%s vs %s", simple_feature, aleti_feature)
+  )
+  lines(dt$datetime, dt$aleti_cumret, col = "#d62728", lwd = 1.5)
+  grid()
+  legend(
+    "topleft",
+    legend = c("simple hourly", "Aleti"),
+    col = c("#1f77b4", "#d62728"),
+    lwd = 1.5,
+    bty = "n"
+  )
+  dev.off()
+
+  dt[, .(
+    datetime,
+    simple_feature,
+    aleti_feature,
+    simple_ret,
+    aleti_ret,
+    simple_cumret,
+    aleti_cumret
+  )]
+}), use.names = TRUE, fill = TRUE)
+
+curve_file = sub("\\.csv$", "_cumulative_returns.csv", PATH_COMPARE_OUT)
+if (nrow(cumulative_curves)) {
+  fwrite(cumulative_curves, curve_file)
+}
+
 cat(sprintf(
-  "Saved Aleti comparison: %s rows=%d matched_timestamps=%d\n",
+  "Saved Aleti comparison: %s rows=%d matched_timestamps=%d plots=%s\n",
   PATH_COMPARE_OUT,
   nrow(results),
-  nrow(merged)
+  nrow(merged),
+  PATH_COMPARE_PLOTS
 ))
 
 quit(save = "no", status = 0L, runLast = FALSE)
