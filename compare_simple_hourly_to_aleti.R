@@ -40,6 +40,7 @@ PATH_COMPARE_PLOTS = env_chr(
 )
 ALETI_FORCE_AGGREGATE = env_chr("ALETI_FORCE_AGGREGATE", "0") %in% c("1", "true", "TRUE", "yes", "YES")
 ALETI_MAX_FILES = env_int("ALETI_MAX_FILES", 0L)
+SIMPLE_TIME_SHIFT_HOURS = env_int("SIMPLE_TIME_SHIFT_HOURS", 0L)
 
 comparison_map = data.table(
   simple_feature = c(
@@ -84,6 +85,19 @@ ceiling_hour = function(x) {
     origin = "1970-01-01",
     tz = "America/New_York"
   )
+}
+
+parse_simple_datetime = function(x) {
+  if (inherits(x, c("POSIXct", "POSIXlt"))) {
+    return(as.POSIXct(x, tz = "UTC"))
+  }
+  x_chr = as.character(x)
+  out = suppressWarnings(as.POSIXct(x_chr, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"))
+  missing = is.na(out)
+  if (any(missing)) {
+    out[missing] = suppressWarnings(as.POSIXct(x_chr[missing], tz = "America/New_York"))
+  }
+  out
 }
 
 aleti_cache_meta_file = function(out_file) {
@@ -251,6 +265,16 @@ simple_cols = unique(c(intersect("date", simple_header), required_simple_cols, a
 simple = fread(PATH_SIMPLE_FACTORS, select = simple_cols, showProgress = FALSE)
 simple[, trading_day := as.IDate(trading_day)]
 simple[, bar_time := as.character(bar_time)]
+if (SIMPLE_TIME_SHIFT_HOURS != 0L) {
+  if ("date" %in% names(simple)) {
+    simple[, .simple_datetime := parse_simple_datetime(date) + SIMPLE_TIME_SHIFT_HOURS * 3600]
+  } else {
+    simple[, .simple_datetime := as.POSIXct(paste(trading_day, bar_time), tz = "America/New_York") + SIMPLE_TIME_SHIFT_HOURS * 3600]
+  }
+  simple[, trading_day := as.IDate(.simple_datetime, tz = "America/New_York")]
+  simple[, bar_time := format(.simple_datetime, "%H:%M:%S", tz = "America/New_York")]
+  simple[, .simple_datetime := NULL]
+}
 simple = simple[!is.na(trading_day) & !is.na(bar_time)]
 duplicate_simple_keys = simple[, .N, by = .(trading_day, bar_time)][N > 1L]
 if (nrow(duplicate_simple_keys)) {
