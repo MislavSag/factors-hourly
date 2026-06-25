@@ -174,7 +174,9 @@ aggregate_aleti_minutes_to_hourly = function(minute_dir, out_file, minute_featur
   setnames(hourly, minute_features, paste0(minute_features, "_hour"))
   setorder(hourly, datetime)
   dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
-  fwrite(hourly, out_file)
+  hourly_out = copy(hourly)
+  hourly_out[, datetime := format(datetime, "%Y-%m-%d %H:%M:%S", tz = "UTC")]
+  fwrite(hourly_out, out_file)
   write_aleti_cache_metadata(out_file, minute_dir, minute_files, minute_features)
   cat(sprintf("Saved hourly Aleti factors from minute returns: %s rows=%d cols=%d\n", out_file, nrow(hourly), ncol(hourly)))
   out_file
@@ -259,8 +261,13 @@ if (nrow(duplicate_simple_keys)) {
 }
 
 aleti_cols = unique(c("datetime", active_map$aleti_feature))
-aleti = fread(PATH_ALETI_FACTORS, select = aleti_cols, showProgress = FALSE)
-aleti[, datetime := as.POSIXct(datetime, tz = "America/New_York")]
+aleti = fread(
+  PATH_ALETI_FACTORS,
+  select = aleti_cols,
+  colClasses = c(datetime = "character"),
+  showProgress = FALSE
+)
+aleti[, datetime := as.POSIXct(datetime, format = "%Y-%m-%d %H:%M:%S", tz = "America/New_York")]
 aleti[, trading_day := as.IDate(datetime, tz = "America/New_York")]
 aleti[, bar_time := format(datetime, "%H:%M:%S", tz = "America/New_York")]
 
