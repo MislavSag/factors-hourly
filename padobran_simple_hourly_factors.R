@@ -355,7 +355,7 @@ compute_characteristic_factor = function(data, feature, prefix = "") {
         )
       }
     }
-  }, by = .(date, trading_day, bar_time, is_first_bar)]
+  }, by = .(date, trading_day, bar_time)]
 
   out[, feature := factor_name]
   out
@@ -371,7 +371,7 @@ market_ew = dt[, .(
   signal_q_low = NA_real_,
   signal_q_high = NA_real_,
   feature = "MKT_EW"
-), by = .(date, trading_day, bar_time, is_first_bar)]
+), by = .(date, trading_day, bar_time)]
 
 market_vw = dt[, .(
   n = sum(is.finite(.ret) & is.finite(.weight) & .weight > 0),
@@ -383,7 +383,7 @@ market_vw = dt[, .(
   signal_q_low = NA_real_,
   signal_q_high = NA_real_,
   feature = "MKT_DOLLAR_VOL_W"
-), by = .(date, trading_day, bar_time, is_first_bar)]
+), by = .(date, trading_day, bar_time)]
 
 factor_parts = list(market_ew, market_vw)
 manifest = data.table(feature = c("MKT_EW", "MKT_DOLLAR_VOL_W"), source = "market")
@@ -405,7 +405,7 @@ if (nzchar(PATH_INDUSTRY_MAP) && file.exists(PATH_INDUSTRY_MAP)) {
       factor_ret = mean(.ret, na.rm = TRUE),
       signal_q_low = NA_real_,
       signal_q_high = NA_real_
-    ), by = .(date, trading_day, bar_time, is_first_bar, industry)]
+    ), by = .(date, trading_day, bar_time, industry)]
     industry_returns[, feature := make_factor_name("IND_", industry)]
     industry_returns[, industry := NULL]
     factor_parts[[length(factor_parts) + 1L]] = industry_returns
@@ -489,7 +489,6 @@ setcolorder(factor_returns, c(
   "date",
   "trading_day",
   "bar_time",
-  "is_first_bar",
   "feature",
   "factor_ret",
   "long_ret",
@@ -515,8 +514,8 @@ summary_dt = factor_returns[, .(
 setorder(summary_dt, -n_obs, feature)
 
 wide = dcast(
-  factor_returns[, .(date, trading_day, bar_time, is_first_bar, feature, factor_ret)],
-  date + trading_day + bar_time + is_first_bar ~ feature,
+  factor_returns[, .(date, trading_day, bar_time, feature, factor_ret)],
+  date + trading_day + bar_time ~ feature,
   value.var = "factor_ret"
 )
 setorder(wide, date)

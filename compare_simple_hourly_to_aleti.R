@@ -248,6 +248,15 @@ simple = fread(PATH_SIMPLE_FACTORS, select = simple_cols, showProgress = FALSE)
 simple[, trading_day := as.IDate(trading_day)]
 simple[, bar_time := as.character(bar_time)]
 simple = simple[!is.na(trading_day) & !is.na(bar_time)]
+duplicate_simple_keys = simple[, .N, by = .(trading_day, bar_time)][N > 1L]
+if (nrow(duplicate_simple_keys)) {
+  stop(sprintf(
+    "Simple factor file has duplicate trading_day/bar_time keys. First duplicate: %s %s n=%d. Regenerate simple factors with the fixed timestamp grouping.",
+    duplicate_simple_keys$trading_day[[1L]],
+    duplicate_simple_keys$bar_time[[1L]],
+    duplicate_simple_keys$N[[1L]]
+  ))
+}
 
 aleti_cols = unique(c("datetime", active_map$aleti_feature))
 aleti = fread(PATH_ALETI_FACTORS, select = aleti_cols, showProgress = FALSE)
