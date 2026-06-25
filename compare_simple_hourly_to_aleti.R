@@ -7,13 +7,28 @@ env_chr = function(name, default) {
   if (nzchar(value)) value else default
 }
 
+env_int = function(name, default) {
+  value = Sys.getenv(name, unset = "")
+  if (!nzchar(value)) return(default)
+  parsed = suppressWarnings(as.integer(value))
+  if (is.na(parsed)) default else parsed
+}
+
 PATH_SIMPLE_FACTORS = env_chr(
   "PATH_SIMPLE_FACTORS",
   file.path("factor_returns_simple", "factor_returns_wide.csv")
 )
+PATH_ALETI_MINUTE_DIR = env_chr(
+  "PATH_ALETI_MINUTE_DIR",
+  file.path("..", "intradayzoo", "data", "factor_returns")
+)
+PATH_ALETI_HOURLY_FACTORS = env_chr(
+  "PATH_ALETI_HOURLY_FACTORS",
+  file.path(dirname(PATH_SIMPLE_FACTORS), "aleti_hourly_from_minute.csv")
+)
 PATH_ALETI_FACTORS = env_chr(
   "PATH_ALETI_FACTORS",
-  file.path("..", "intradayzoo", "data", "factor_returns.csv")
+  PATH_ALETI_HOURLY_FACTORS
 )
 PATH_COMPARE_OUT = env_chr(
   "PATH_COMPARE_OUT",
@@ -23,13 +38,8 @@ PATH_COMPARE_PLOTS = env_chr(
   "PATH_COMPARE_PLOTS",
   file.path(dirname(PATH_COMPARE_OUT), "aleti_comparison_plots")
 )
-
-if (!file.exists(PATH_SIMPLE_FACTORS)) {
-  stop(sprintf("Simple factor file not found: %s", PATH_SIMPLE_FACTORS))
-}
-if (!file.exists(PATH_ALETI_FACTORS)) {
-  stop(sprintf("Aleti factor file not found: %s", PATH_ALETI_FACTORS))
-}
+ALETI_FORCE_AGGREGATE = env_chr("ALETI_FORCE_AGGREGATE", "0") %in% c("1", "true", "TRUE", "yes", "YES")
+ALETI_MAX_FILES = env_int("ALETI_MAX_FILES", 0L)
 
 comparison_map = data.table(
   simple_feature = c(
@@ -44,19 +54,174 @@ comparison_map = data.table(
     "beta_tailrisk_proxy_252d",
     "rvol_21d"
   ),
-  aleti_feature = c(
-    "ff__mkt_hour",
-    "ff__mkt_hour",
-    "jkp__zero_trades_21d_hour",
-    "jkp__zero_trades_126d_hour",
-    "jkp__zero_trades_252d_hour",
-    "jkp__turnover_126d_hour",
-    "jkp__turnover_var_126d_hour",
-    "jkp__ivol_capm_252d_hour",
-    "cz__betatailrisk_hour",
-    "jkp__rvol_21d_hour"
+  aleti_minute_feature = c(
+    "ff__mkt",
+    "ff__mkt",
+    "jkp__zero_trades_21d",
+    "jkp__zero_trades_126d",
+    "jkp__zero_trades_252d",
+    "jkp__turnover_126d",
+    "jkp__turnover_var_126d",
+    "jkp__ivol_capm_252d",
+    "cz__betatailrisk",
+    "jkp__rvol_21d"
   )
 )
+comparison_map[, aleti_feature := paste0(aleti_minute_feature, "_hour")]
+
+compound_return = function(x) {
+  x = as.numeric(x)
+  x = x[is.finite(x)]
+  if (!length(x)) return(NA_real_)
+  prod(1 + x) - 1
+}
+
+ceiling_hour = function(x) {
+  as.POSIXct(
+    ceiling(as.numeric(x) / 3600) * 3600,
+    origin = "1970-01-01",
+    tz = "America/New_York"
+  )
+}
+
+aleti_cache_meta_file = function(out_file) {
+  paste0(out_file, ".meta.csv")
+}
+
+aleti_cache_metadata_matches = function(out_file, minute_dir, minute_features, expected_file_count) {
+  meta_file = aleti_cache_meta_file(out_file)
+  if (!file.exists(meta_file)) return(FALSE)
+
+  meta = tryCatch(
+    fread(meta_file, showProgress = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(meta) || !nrow(meta)) return(FALSE)
+
+  expected_features = paste(sort(unique(minute_features)), collapse = "|")
+  expected_dir = normalizePath(minute_dir, winslash = "/", mustWork = FALSE)
+  all(c(
+    "minute_dir",
+    "minute_file_count",
+    "minute_features"
+  ) %in% names(meta)) &&
+    identical(meta$minute_dir[[1]], expected_dir) &&
+    identical(as.integer(meta$minute_file_count[[1]]), as.integer(expected_file_count)) &&
+    identical(meta$minute_features[[1]], expected_features)
+}
+
+write_aleti_cache_metadata = function(out_file, minute_dir, minute_files, minute_features) {
+  meta = data.table(
+    created_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+    minute_dir = normalizePath(minute_dir, winslash = "/", mustWork = FALSE),
+    minute_file_count = length(minute_files),
+    first_minute_file = basename(minute_files[[1L]]),
+    last_minute_file = basename(minute_files[[length(minute_files)]]),
+    minute_features = paste(sort(unique(minute_features)), collapse = "|")
+  )
+  fwrite(meta, aleti_cache_meta_file(out_file))
+}
+
+aggregate_aleti_minutes_to_hourly = function(minute_dir, out_file, minute_features, max_files = 0L) {
+  if (!requireNamespace("arrow", quietly = TRUE)) {
+    stop("Package 'arrow' is required to aggregate raw Aleti minute parquet files.")
+  }
+  if (!requireNamespace("tidyselect", quietly = TRUE)) {
+    stop("Package 'tidyselect' is required to select Aleti parquet columns.")
+  }
+
+  minute_files = sort(list.files(minute_dir, pattern = "\\.parquet$", full.names = TRUE))
+  if (!length(minute_files)) {
+    stop(sprintf("No Aleti minute parquet files found in %s", minute_dir))
+  }
+  if (max_files > 0L) {
+    minute_files = head(minute_files, max_files)
+  }
+
+  needed_cols = unique(c("datetime", minute_features))
+  hourly_parts = vector("list", length(minute_files))
+  cat(sprintf("Aggregating %d Aleti minute parquet files to hourly returns\n", length(minute_files)))
+  for (i in seq_along(minute_files)) {
+    dt = as.data.table(arrow::read_parquet(
+      minute_files[[i]],
+      col_select = tidyselect::all_of(needed_cols)
+    ))
+    missing_cols = setdiff(needed_cols, names(dt))
+    if (length(missing_cols)) {
+      stop(sprintf(
+        "Missing columns in %s: %s",
+        minute_files[[i]],
+        paste(missing_cols, collapse = ", ")
+      ))
+    }
+
+    dt[, datetime := as.POSIXct(datetime, tz = "America/New_York")]
+    dt[, minute_time := format(datetime, "%H:%M:%S", tz = "America/New_York")]
+    dt = dt[minute_time != "09:30:00"]
+    dt[, datetime_hour := ceiling_hour(datetime)]
+
+    hourly_parts[[i]] = dt[, lapply(.SD, compound_return),
+      by = .(datetime = datetime_hour),
+      .SDcols = minute_features
+    ]
+    if (i %% 25L == 0L) {
+      cat(sprintf("Aggregated %d/%d Aleti minute files\n", i, length(minute_files)))
+    }
+  }
+
+  hourly = rbindlist(hourly_parts, use.names = TRUE, fill = TRUE)
+  hourly = hourly[, lapply(.SD, compound_return), by = datetime, .SDcols = minute_features]
+  setnames(hourly, minute_features, paste0(minute_features, "_hour"))
+  setorder(hourly, datetime)
+  dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
+  fwrite(hourly, out_file)
+  write_aleti_cache_metadata(out_file, minute_dir, minute_files, minute_features)
+  cat(sprintf("Saved hourly Aleti factors from minute returns: %s rows=%d cols=%d\n", out_file, nrow(hourly), ncol(hourly)))
+  out_file
+}
+
+if (dir.exists(PATH_ALETI_MINUTE_DIR)) {
+  all_minute_files = sort(list.files(PATH_ALETI_MINUTE_DIR, pattern = "\\.parquet$", full.names = TRUE))
+  expected_file_count = length(all_minute_files)
+  if (ALETI_MAX_FILES > 0L) {
+    expected_file_count = min(expected_file_count, ALETI_MAX_FILES)
+  }
+  needs_aggregation = TRUE
+  if (file.exists(PATH_ALETI_HOURLY_FACTORS) && !ALETI_FORCE_AGGREGATE) {
+    cached_header = names(fread(PATH_ALETI_HOURLY_FACTORS, nrows = 0L, showProgress = FALSE))
+    header_matches = all(c("datetime", comparison_map$aleti_feature) %in% cached_header)
+    metadata_matches = aleti_cache_metadata_matches(
+      PATH_ALETI_HOURLY_FACTORS,
+      PATH_ALETI_MINUTE_DIR,
+      unique(comparison_map$aleti_minute_feature),
+      expected_file_count
+    )
+    needs_aggregation = !(header_matches && metadata_matches)
+  }
+  if (needs_aggregation || ALETI_FORCE_AGGREGATE) {
+    aggregate_aleti_minutes_to_hourly(
+      PATH_ALETI_MINUTE_DIR,
+      PATH_ALETI_HOURLY_FACTORS,
+      unique(comparison_map$aleti_minute_feature),
+      ALETI_MAX_FILES
+    )
+  }
+  PATH_ALETI_FACTORS = PATH_ALETI_HOURLY_FACTORS
+}
+
+if (!file.exists(PATH_ALETI_FACTORS)) {
+  stop(sprintf(
+    "Aleti hourly factor file not found: %s. Set PATH_ALETI_MINUTE_DIR to raw parquet directory or PATH_ALETI_FACTORS to an hourly CSV.",
+    PATH_ALETI_FACTORS
+  ))
+}
+
+if (!file.exists(PATH_SIMPLE_FACTORS)) {
+  stop(sprintf(
+    "Simple factor file not found: %s. Aleti hourly cache is ready if aggregation completed.",
+    PATH_SIMPLE_FACTORS
+  ))
+}
 
 simple_header = names(fread(PATH_SIMPLE_FACTORS, nrows = 0L, showProgress = FALSE))
 aleti_header = names(fread(PATH_ALETI_FACTORS, nrows = 0L, showProgress = FALSE))
@@ -69,7 +234,16 @@ if (!nrow(active_map)) {
   stop("No overlapping comparison features found. Wrote availability table.")
 }
 
-simple_cols = unique(c("date", "trading_day", "bar_time", active_map$simple_feature))
+required_simple_cols = c("trading_day", "bar_time")
+missing_required_simple_cols = setdiff(required_simple_cols, simple_header)
+if (length(missing_required_simple_cols)) {
+  stop(sprintf(
+    "Simple factor file is missing required columns: %s",
+    paste(missing_required_simple_cols, collapse = ", ")
+  ))
+}
+
+simple_cols = unique(c(intersect("date", simple_header), required_simple_cols, active_map$simple_feature))
 simple = fread(PATH_SIMPLE_FACTORS, select = simple_cols, showProgress = FALSE)
 simple[, trading_day := as.IDate(trading_day)]
 simple[, bar_time := as.character(bar_time)]
@@ -80,7 +254,6 @@ aleti = fread(PATH_ALETI_FACTORS, select = aleti_cols, showProgress = FALSE)
 aleti[, datetime := as.POSIXct(datetime, tz = "America/New_York")]
 aleti[, trading_day := as.IDate(datetime, tz = "America/New_York")]
 aleti[, bar_time := format(datetime, "%H:%M:%S", tz = "America/New_York")]
-aleti = aleti[grepl(":00:00$", bar_time)]
 
 simple_feature_cols = intersect(active_map$simple_feature, names(simple))
 aleti_feature_cols = intersect(active_map$aleti_feature, names(aleti))
@@ -94,8 +267,15 @@ merged = merge(
   all = FALSE,
   allow.cartesian = TRUE
 )
-merged[, plot_datetime := as.POSIXct(date, tz = "America/New_York")]
-if (all(is.na(merged$plot_datetime)) && "datetime" %in% names(merged)) {
+if ("date" %in% names(merged)) {
+  merged[, plot_datetime := as.POSIXct(date, tz = "America/New_York")]
+} else {
+  merged[, plot_datetime := as.POSIXct(
+    paste(trading_day, bar_time),
+    tz = "America/New_York"
+  )]
+}
+if ((!nrow(merged) || all(is.na(merged$plot_datetime))) && "datetime" %in% names(merged)) {
   merged[, plot_datetime := as.POSIXct(datetime, tz = "America/New_York")]
 }
 setorder(merged, plot_datetime)
@@ -182,11 +362,18 @@ cumulative_curves = rbindlist(lapply(seq_len(nrow(active_map)), function(i) {
 
   plot_file = file.path(
     PATH_COMPARE_PLOTS,
-    sprintf("%s_vs_%s.png", simple_feature, aleti_feature)
+    gsub(
+      "[^A-Za-z0-9_.-]",
+      "_",
+      sprintf("%s_vs_%s.png", simple_feature, aleti_feature)
+    )
   )
-  plot_file = gsub("[^A-Za-z0-9_./-]", "_", plot_file)
 
-  png(plot_file, width = 1400, height = 850, res = 140)
+  if (capabilities("cairo")) {
+    png(plot_file, width = 1400, height = 850, res = 140, type = "cairo")
+  } else {
+    png(plot_file, width = 1400, height = 850, res = 140)
+  }
   y_range = range(c(dt$simple_cumret, dt$aleti_cumret), na.rm = TRUE)
   plot(
     dt$datetime,
