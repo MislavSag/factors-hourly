@@ -47,8 +47,10 @@ PATH_PRICES = env_chr("PATH_PRICES", "prices_factors_hour")
 PATH_FACTORS = env_chr("PATH_FACTORS", "factor_returns_simple")
 PATH_INDUSTRY_MAP = env_chr("PATH_INDUSTRY_MAP", "")
 PATH_FUNDAMENTALS = env_chr("PATH_FUNDAMENTALS", "")
+PATH_MARKET_CAP = env_chr("PATH_MARKET_CAP", "")
 
 RETURN_COL = env_chr("SIMPLE_RETURN_COL", "returns_oc")
+WEIGHT_SOURCE = env_chr("SIMPLE_WEIGHT_SOURCE", "dollar_vol")
 WINDOWS = parse_ints(env_chr("SIMPLE_WINDOWS", ""), c(22L, 147L, 441L))
 ZERO_TRADE_WINDOWS_DAYS = parse_ints(env_chr("SIMPLE_ZERO_TRADE_WINDOWS_DAYS", ""), c(21L, 126L, 252L))
 TURNOVER_WINDOW_DAYS = env_int("SIMPLE_TURNOVER_WINDOW_DAYS", 126L)
@@ -65,12 +67,16 @@ DROP_FIRST_BAR = env_bool("SIMPLE_DROP_FIRST_BAR", FALSE)
 WRITE_LONG_CSV = env_bool("SIMPLE_WRITE_LONG_CSV", TRUE)
 WRITE_RDS = env_bool("SIMPLE_WRITE_RDS", TRUE)
 FUNDAMENTAL_LAG_DAYS = env_int("SIMPLE_FUNDAMENTAL_LAG_DAYS", 45L)
+MARKET_CAP_LAG_DAYS = env_int("SIMPLE_MARKET_CAP_LAG_DAYS", 1L)
 
 if (TAIL_PROB <= 0 || TAIL_PROB >= 0.5) {
   stop("SIMPLE_TAIL_PROB must be in (0, 0.5).")
 }
 if (MAX_NA_FRAC < 0 || MAX_NA_FRAC >= 1) {
   stop("SIMPLE_MAX_NA_FRAC must be in [0, 1).")
+}
+if (!WEIGHT_SOURCE %in% c("dollar_vol", "market_cap")) {
+  stop("SIMPLE_WEIGHT_SOURCE must be either 'dollar_vol' or 'market_cap'.")
 }
 
 dir.create(PATH_FACTORS, recursive = TRUE, showWarnings = FALSE)
@@ -85,6 +91,25 @@ if (MAX_FILES > 0L) {
 
 read_header = function(file) {
   names(fread(file, nrows = 0L, showProgress = FALSE))
+}
+
+read_optional_table = function(file) {
+  if (grepl("\\.rds$", file, ignore.case = TRUE)) {
+    as.data.table(readRDS(file))
+  } else if (grepl("\\.parquet$", file, ignore.case = TRUE)) {
+    if (!requireNamespace("arrow", quietly = TRUE)) {
+      stop("Reading parquet PATH_MARKET_CAP requires the arrow package.")
+    }
+    as.data.table(arrow::read_parquet(file))
+  } else {
+    fread(file, showProgress = FALSE)
+  }
+}
+
+normalize_market_symbol = function(x) {
+  x = toupper(as.character(x))
+  x = sub("\\.[0-9]+$", "", x)
+  gsub(".", "-", x, fixed = TRUE)
 }
 
 read_price_file = function(file) {
@@ -170,8 +195,51 @@ if (DROP_FIRST_BAR && "is_first_bar" %in% names(dt)) {
 }
 
 setorder(dt, symbol, date)
-dt[, .weight := shift(.dollar_vol, 1L), by = symbol]
-dt[!is.finite(.weight) | .weight <= 0, .weight := NA_real_]
+if (WEIGHT_SOURCE == "market_cap") {
+  if (!nzchar(PATH_MARKET_CAP) || !file.exists(PATH_MARKET_CAP)) {
+    stop("SIMPLE_WEIGHT_SOURCE=market_cap requires PATH_MARKET_CAP to point to a market cap table.")
+  }
+
+  market_cap = read_optional_table(PATH_MARKET_CAP)
+  date_col = intersect(c("date", "trading_day", "market_cap_date"), names(market_cap))[1L]
+  if (!"symbol" %in% names(market_cap) || is.na(date_col) || !"market_cap" %in% names(market_cap)) {
+    stop("PATH_MARKET_CAP must contain symbol, date/trading_day, and market_cap columns.")
+  }
+
+  market_cap[, .market_symbol := normalize_market_symbol(symbol)]
+  market_cap[, trading_day := as.IDate(get(date_col)) + MARKET_CAP_LAG_DAYS]
+  market_cap[, .market_cap := as.numeric(market_cap)]
+  market_cap = market_cap[
+    nzchar(.market_symbol) & !is.na(trading_day) & is.finite(.market_cap) & .market_cap > 0,
+    .(.market_symbol, trading_day, .market_cap)
+  ]
+  setorder(market_cap, .market_symbol, trading_day)
+  market_cap = market_cap[, .SD[.N], by = .(.market_symbol, trading_day)]
+  setkey(market_cap, .market_symbol, trading_day)
+
+  dt[, .market_symbol := normalize_market_symbol(symbol)]
+  setkey(dt, .market_symbol, trading_day)
+  dt = market_cap[dt, roll = Inf]
+  setorder(dt, symbol, date)
+  dt[, .weight := .market_cap]
+  dt[!is.finite(.weight) | .weight <= 0, .weight := NA_real_]
+
+  cat(sprintf(
+    "Using market-cap weights from %s: coverage rows=%d/%d symbols=%d/%d lag_days=%d\n",
+    PATH_MARKET_CAP,
+    sum(is.finite(dt$.weight) & dt$.weight > 0),
+    nrow(dt),
+    uniqueN(dt[is.finite(.weight) & .weight > 0, symbol]),
+    uniqueN(dt$symbol),
+    MARKET_CAP_LAG_DAYS
+  ))
+} else {
+  dt[, .weight := shift(.dollar_vol, 1L), by = symbol]
+  dt[!is.finite(.weight) | .weight <= 0, .weight := NA_real_]
+
+  cat("Using lagged hourly dollar-volume weights.\n")
+}
+MARKET_WEIGHT_FEATURE = if (WEIGHT_SOURCE == "market_cap") "MKT_MARKET_CAP_W" else "MKT_DOLLAR_VOL_W"
 
 feature_cols = character()
 feature_sources = data.table(feature = character(), source = character())
@@ -209,6 +277,10 @@ build_aleti_style_daily_features = function(hourly_dt) {
     daily_ret = if (all(!is.finite(.ret))) NA_real_ else prod(1 + .ret[is.finite(.ret)]) - 1,
     daily_volume = sum(.volume, na.rm = TRUE),
     daily_dollar_vol = sum(.dollar_vol, na.rm = TRUE),
+    daily_weight = {
+      ok = is.finite(.weight) & .weight > 0
+      if (any(ok)) tail(.weight[ok], 1L) else NA_real_
+    },
     n_bars = sum(is.finite(.ret) | is.finite(.volume))
   ), by = .(symbol, trading_day)]
 
@@ -222,12 +294,13 @@ build_aleti_style_daily_features = function(hourly_dt) {
   daily[is.na(daily_dollar_vol), daily_dollar_vol := 0]
   daily[, zero_trade_day := as.integer(n_bars == 0L | daily_volume <= 0)]
   daily[, daily_ret0 := fifelse(is.finite(daily_ret), daily_ret, 0)]
+  daily[, market_weight := fifelse(is.finite(daily_weight) & daily_weight > 0, daily_weight, daily_dollar_vol)]
 
   market_daily = daily[, .(
     mkt_daily_ret = mean(daily_ret0, na.rm = TRUE),
     mkt_daily_ret_vw = {
-      ok = is.finite(daily_ret0) & is.finite(daily_dollar_vol) & daily_dollar_vol > 0
-      if (any(ok)) sum(daily_ret0[ok] * daily_dollar_vol[ok]) / sum(daily_dollar_vol[ok]) else NA_real_
+      ok = is.finite(daily_ret0) & is.finite(market_weight) & market_weight > 0
+      if (any(ok)) sum(daily_ret0[ok] * market_weight[ok]) / sum(market_weight[ok]) else NA_real_
     }
   ), by = trading_day]
   daily = market_daily[daily, on = "trading_day"]
@@ -388,11 +461,11 @@ market_vw = dt[, .(
   factor_ret = weighted_mean(.ret, .weight),
   signal_q_low = NA_real_,
   signal_q_high = NA_real_,
-  feature = "MKT_DOLLAR_VOL_W"
+  feature = MARKET_WEIGHT_FEATURE
 ), by = .(date, trading_day, bar_time)]
 
 factor_parts = list(market_ew, market_vw)
-manifest = data.table(feature = c("MKT_EW", "MKT_DOLLAR_VOL_W"), source = "market")
+manifest = data.table(feature = c("MKT_EW", MARKET_WEIGHT_FEATURE), source = c("market", paste0("market_", WEIGHT_SOURCE)))
 
 if (nzchar(PATH_INDUSTRY_MAP) && file.exists(PATH_INDUSTRY_MAP)) {
   industry_map = fread(PATH_INDUSTRY_MAP)
@@ -420,14 +493,6 @@ if (nzchar(PATH_INDUSTRY_MAP) && file.exists(PATH_INDUSTRY_MAP)) {
       unique(industry_returns[, .(feature, source = "industry")]),
       use.names = TRUE
     )
-  }
-}
-
-read_optional_table = function(file) {
-  if (grepl("\\.rds$", file, ignore.case = TRUE)) {
-    as.data.table(readRDS(file))
-  } else {
-    fread(file, showProgress = FALSE)
   }
 }
 

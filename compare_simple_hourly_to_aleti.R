@@ -45,6 +45,7 @@ comparison_map = data.table(
   simple_feature = c(
     "MKT_EW",
     "MKT_DOLLAR_VOL_W",
+    "MKT_MARKET_CAP_W",
     "zero_trades_21d",
     "zero_trades_126d",
     "zero_trades_252d",
@@ -55,6 +56,7 @@ comparison_map = data.table(
     "rvol_21d"
   ),
   aleti_minute_feature = c(
+    "ff__mkt",
     "ff__mkt",
     "ff__mkt",
     "jkp__zero_trades_21d",
