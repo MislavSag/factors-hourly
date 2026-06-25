@@ -61,6 +61,7 @@ MIN_LEG_N = env_int("SIMPLE_MIN_LEG_N", 10L)
 MAX_NA_FRAC = env_num("SIMPLE_MAX_NA_FRAC", 0.80)
 MIN_SYMBOL_ROWS = env_int("SIMPLE_MIN_SYMBOL_ROWS", 50L)
 MAX_FILES = env_int("SIMPLE_MAX_FILES", 0L)
+DROP_FIRST_BAR = env_bool("SIMPLE_DROP_FIRST_BAR", FALSE)
 WRITE_LONG_CSV = env_bool("SIMPLE_WRITE_LONG_CSV", TRUE)
 WRITE_RDS = env_bool("SIMPLE_WRITE_RDS", TRUE)
 FUNDAMENTAL_LAG_DAYS = env_int("SIMPLE_FUNDAMENTAL_LAG_DAYS", 45L)
@@ -162,6 +163,11 @@ for (i in seq_along(price_files)) {
 dt = rbindlist(parts, use.names = TRUE, fill = TRUE)
 rm(parts)
 if (!nrow(dt)) stop("No rows after reading price files.")
+if (DROP_FIRST_BAR && "is_first_bar" %in% names(dt)) {
+  before_drop = nrow(dt)
+  dt = dt[is.na(is_first_bar) | is_first_bar == FALSE]
+  cat(sprintf("Dropped first bars for intraday-only factors: %d rows\n", before_drop - nrow(dt)))
+}
 
 setorder(dt, symbol, date)
 dt[, .weight := shift(.dollar_vol, 1L), by = symbol]
