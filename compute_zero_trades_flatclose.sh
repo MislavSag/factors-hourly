@@ -2,7 +2,7 @@
 
 #PBS -N zero_flat
 #PBS -l ncpus=1
-#PBS -l mem=24GB
+#PBS -l mem=16GB
 #PBS -l walltime=168:00:00
 #PBS -J 1-3
 #PBS -o logs
