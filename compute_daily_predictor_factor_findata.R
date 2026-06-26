@@ -543,6 +543,7 @@ summary_dt = factor_returns[, .(
   mean_n_short = mean(n_short, na.rm = TRUE)
 ), by = feature]
 summary_file = sub("\\.csv$", "_summary.csv", out_file)
+summary_file = file.path(parts_dir, sprintf("summary_%s.csv", safe_feature_name(DAILY_FEATURE)))
 fwrite(summary_dt, summary_file)
 
 manifest = data.table(
@@ -556,7 +557,7 @@ manifest = data.table(
   market_tail_z = MARKET_TAIL_Z,
   output_file = out_file
 )
-fwrite(manifest, sub("\\.csv$", "_manifest.csv", out_file))
+fwrite(manifest, file.path(parts_dir, sprintf("manifest_%s.csv", safe_feature_name(DAILY_FEATURE))))
 
 cat(sprintf("Saved %s rows=%d\n", out_file, nrow(factor_returns)))
 print(summary_dt)
