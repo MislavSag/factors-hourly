@@ -154,6 +154,9 @@ TAIL_PROB = env_num("SIMPLE_TAIL_PROB", 0.10)
 MIN_LEG_N = env_int("SIMPLE_MIN_LEG_N", 10L)
 MAX_NA_FRAC = env_num("SIMPLE_MAX_NA_FRAC", 0.80)
 MAX_ABS_RETURN = env_num("SIMPLE_MAX_ABS_RETURN", 0.20)
+ZERO_TRADE_MODE = env_chr("ZERO_TRADE_MODE", "volume")
+ZERO_TRADE_CLOSE_EPS = env_num("ZERO_TRADE_CLOSE_EPS", 1e-10)
+ZERO_TRADE_MIN_FLAT_BARS = env_int("ZERO_TRADE_MIN_FLAT_BARS", 2L)
 MIN_SYMBOL_ROWS = env_int("SIMPLE_MIN_SYMBOL_ROWS", 50L)
 MAX_FILES = env_int("SIMPLE_MAX_FILES", 0L)
 MARKET_TAIL_Z = env_num("SIMPLE_MARKET_TAIL_Z", -1.0)
@@ -165,6 +168,9 @@ if (TAIL_PROB <= 0 || TAIL_PROB >= 0.5) {
 }
 if (MAX_NA_FRAC < 0 || MAX_NA_FRAC >= 1) {
   stop("SIMPLE_MAX_NA_FRAC must be in [0, 1).")
+}
+if (!ZERO_TRADE_MODE %in% c("volume", "flat_close", "volume_or_flat_close")) {
+  stop("ZERO_TRADE_MODE must be one of: volume, flat_close, volume_or_flat_close.")
 }
 if (!file.exists(PATH_MARKET_CAP)) {
   stop(sprintf("PATH_MARKET_CAP does not exist: %s", PATH_MARKET_CAP))
@@ -224,7 +230,7 @@ read_symbol_file = function(file) {
   dt[!is.finite(volume) | volume < 0, volume := NA_real_]
   dt[, dollar_vol := close * volume]
   dt[!is.finite(dollar_vol) | dollar_vol <= 0, dollar_vol := NA_real_]
-  dt[, .(symbol, date, trading_day, bar_time, ret, volume, dollar_vol)]
+  dt[, .(symbol, date, trading_day, bar_time, ret, close, volume, dollar_vol)]
 }
 
 build_daily_base = function(hourly_dt, all_days) {
@@ -232,6 +238,15 @@ build_daily_base = function(hourly_dt, all_days) {
     daily_ret = if (all(!is.finite(ret))) NA_real_ else prod(1 + ret[is.finite(ret)]) - 1,
     daily_volume = sum(volume, na.rm = TRUE),
     daily_dollar_vol = sum(dollar_vol, na.rm = TRUE),
+    close_n = sum(is.finite(close)),
+    close_min = {
+      x = close[is.finite(close)]
+      if (length(x)) min(x) else NA_real_
+    },
+    close_max = {
+      x = close[is.finite(close)]
+      if (length(x)) max(x) else NA_real_
+    },
     n_bars = sum(is.finite(ret) | is.finite(volume))
   ), by = .(symbol, trading_day)]
 
@@ -247,7 +262,20 @@ build_daily_base = function(hourly_dt, all_days) {
   daily[is.na(n_bars), n_bars := 0L]
   daily[is.na(daily_volume), daily_volume := 0]
   daily[is.na(daily_dollar_vol), daily_dollar_vol := 0]
-  daily[, zero_trade_day := as.integer(n_bars == 0L | daily_volume <= 0)]
+  daily[is.na(close_n), close_n := 0L]
+  daily[, flat_close_day := as.integer(
+    close_n >= ZERO_TRADE_MIN_FLAT_BARS &
+      is.finite(close_min) &
+      is.finite(close_max) &
+      abs(close_max - close_min) <= ZERO_TRADE_CLOSE_EPS * pmax(abs(close_max), 1)
+  )]
+  if (ZERO_TRADE_MODE == "volume") {
+    daily[, zero_trade_day := as.integer(n_bars == 0L | daily_volume <= 0)]
+  } else if (ZERO_TRADE_MODE == "flat_close") {
+    daily[, zero_trade_day := flat_close_day]
+  } else {
+    daily[, zero_trade_day := as.integer(n_bars == 0L | daily_volume <= 0 | flat_close_day == 1L)]
+  }
   daily[, daily_ret0 := fifelse(is.finite(daily_ret), daily_ret, 0)]
   daily
 }
@@ -553,6 +581,9 @@ manifest = data.table(
   market_cap_file = PATH_MARKET_CAP,
   drop_first_bar = DROP_FIRST_BAR,
   max_abs_return = MAX_ABS_RETURN,
+  zero_trade_mode = ZERO_TRADE_MODE,
+  zero_trade_close_eps = ZERO_TRADE_CLOSE_EPS,
+  zero_trade_min_flat_bars = ZERO_TRADE_MIN_FLAT_BARS,
   tail_prob = TAIL_PROB,
   market_tail_z = MARKET_TAIL_Z,
   output_file = out_file
