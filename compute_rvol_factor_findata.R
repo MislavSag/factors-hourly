@@ -220,7 +220,7 @@ for (i in seq_along(price_files)) {
       "Processed %d/%d price files; signal rows so far approx=%d\n",
       i,
       length(price_files),
-      sum(vapply(signal_parts, nrow, integer(1L)))
+      sum(vapply(signal_parts, function(x) if (is.null(x)) 0L else nrow(x), integer(1L)))
     ))
   }
 }
