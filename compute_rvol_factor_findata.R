@@ -81,6 +81,7 @@ RVOL_WINDOW_DAYS = env_int("SIMPLE_RVOL_WINDOW_DAYS", 21L)
 TAIL_PROB = env_num("SIMPLE_TAIL_PROB", 0.10)
 MIN_LEG_N = env_int("SIMPLE_MIN_LEG_N", 10L)
 MAX_NA_FRAC = env_num("SIMPLE_MAX_NA_FRAC", 0.80)
+MAX_ABS_RETURN = env_num("SIMPLE_MAX_ABS_RETURN", Inf)
 MIN_SYMBOL_ROWS = env_int("SIMPLE_MIN_SYMBOL_ROWS", 50L)
 MAX_FILES = env_int("SIMPLE_MAX_FILES", 0L)
 WRITE_SIGNAL_ROWS = env_bool("WRITE_SIGNAL_ROWS", FALSE)
@@ -133,6 +134,9 @@ read_symbol_file = function(file) {
 
   dt[, ret := as.numeric(get(RETURN_COL))]
   dt[!is.finite(ret), ret := NA_real_]
+  if (is.finite(MAX_ABS_RETURN)) {
+    dt[abs(ret) > MAX_ABS_RETURN, ret := NA_real_]
+  }
   dt[, volume := as.numeric(volume)]
   dt[!is.finite(volume) | volume < 0, volume := NA_real_]
   dt[, .(symbol, date, trading_day, bar_time, ret, volume)]
@@ -314,7 +318,8 @@ manifest = data.table(
   market_cap_file = PATH_MARKET_CAP,
   drop_first_bar = DROP_FIRST_BAR,
   rvol_window_days = RVOL_WINDOW_DAYS,
-  tail_prob = TAIL_PROB
+  tail_prob = TAIL_PROB,
+  max_abs_return = MAX_ABS_RETURN
 )
 
 fwrite(manifest, file.path(PATH_FACTORS, "factor_feature_manifest.csv"))
